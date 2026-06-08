@@ -189,6 +189,9 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
     let saveTimer = null;
     let statusTimer = null;
     let ready = false;
+    // True while we replace the text programmatically, so the resulting
+    // 'input' event doesn't trigger a redundant save / re-broadcast.
+    let applying = false;
 
     // Content currently believed to be in sync with disk. note.value differing
     // from this means the user has unsaved local edits ("dirty").
@@ -221,13 +224,54 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
     }
 
     function applyExternal(text) {
-      note.value = text;
+      replaceAllText(text);
       baseline = text;
       pendingExternal = null;
       showStatus('Updated');
     }
 
-    note.addEventListener('input', scheduleSave);
+    // Replace the whole textarea content while keeping the native undo stack
+    // intact. Assigning textarea.value directly wipes the browser undo history,
+    // which makes Ctrl+Z behave erratically after a cross-window sync. Routing
+    // the change through execCommand keeps it as a normal, undoable edit.
+    function replaceAllText(text) {
+      if (note.value === text) return;
+
+      const wasFocused = document.activeElement === note;
+      const selStart = note.selectionStart;
+      const selEnd = note.selectionEnd;
+
+      applying = true;
+      note.focus();
+      note.select();
+
+      let ok = false;
+      try {
+        ok = text === ''
+          ? document.execCommand('delete', false)
+          : document.execCommand('insertText', false, text);
+      } catch (e) {
+        ok = false;
+      }
+      if (!ok || note.value !== text) {
+        // Fallback: loses undo history, but only on platforms without execCommand.
+        note.value = text;
+      }
+      applying = false;
+
+      if (!wasFocused) {
+        note.blur();
+      } else {
+        const start = Math.min(selStart, text.length);
+        const end = Math.min(selEnd, text.length);
+        try { note.setSelectionRange(start, end); } catch (e) { /* ignore */ }
+      }
+    }
+
+    note.addEventListener('input', () => {
+      if (applying) return;
+      scheduleSave();
+    });
 
     note.addEventListener('blur', () => {
       if (!ready) return;
