@@ -2,9 +2,10 @@
   "name": "global-notepad",
   "displayName": "Global Notepad",
   "description": "An always-available sidebar notepad. Notes are stored globally and shared across every workspace and folder.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "martinhoess",
   "license": "MIT",
+  "icon": "media/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/martinhoess/vscode-global-notepad.git"
@@ -21,7 +22,9 @@
     "scratchpad",
     "global"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
