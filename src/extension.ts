@@ -1,7 +1,12 @@
 import * as vscode from 'vscode';
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
   const provider = new NotepadViewProvider(context);
+
+  // Make sure the global storage dir + file exist so the file watcher has a
+  // concrete target before any note is written.
+  await provider.ensureNotesFile();
+  provider.startWatching();
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(NotepadViewProvider.viewType, provider, {
@@ -33,10 +38,33 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'globalNotepad.view';
 
   private view?: vscode.WebviewView;
+  private watcher?: vscode.FileSystemWatcher;
+
+  /** Last content we know is on disk — used to ignore our own write echoes. */
+  private currentText = '';
+
   public readonly notesFile: vscode.Uri;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.notesFile = vscode.Uri.joinPath(context.globalStorageUri, 'notes.txt');
+  }
+
+  /** Watch the global notes file so edits from another VSCode window show up live. */
+  public startWatching(): void {
+    const pattern = new vscode.RelativePattern(this.context.globalStorageUri, 'notes.txt');
+    this.watcher = vscode.workspace.createFileSystemWatcher(pattern);
+
+    const onChange = async () => {
+      const text = await this.read();
+      // Same content we already hold (typically our own write echoing back) — ignore.
+      if (text === this.currentText) return;
+      this.currentText = text;
+      this.view?.webview.postMessage({ type: 'external', text });
+    };
+
+    this.watcher.onDidChange(onChange);
+    this.watcher.onDidCreate(onChange);
+    this.context.subscriptions.push(this.watcher);
   }
 
   public resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -52,12 +80,17 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage(async (message) => {
       switch (message?.type) {
         case 'ready':
-          webviewView.webview.postMessage({ type: 'load', text: await this.read() });
+          this.currentText = await this.read();
+          webviewView.webview.postMessage({ type: 'load', text: this.currentText });
           break;
-        case 'save':
-          await this.write(typeof message.text === 'string' ? message.text : '');
+        case 'save': {
+          const text = typeof message.text === 'string' ? message.text : '';
+          // Record before writing so the watcher echo is recognised and skipped.
+          this.currentText = text;
+          await this.write(text);
           webviewView.webview.postMessage({ type: 'saved' });
           break;
+        }
       }
     });
   }
@@ -157,6 +190,17 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
     let statusTimer = null;
     let ready = false;
 
+    // Content currently believed to be in sync with disk. note.value differing
+    // from this means the user has unsaved local edits ("dirty").
+    let baseline = '';
+    // An external change received while the user was actively editing here;
+    // applied once they click away so we never clobber live keystrokes.
+    let pendingExternal = null;
+
+    function isDirty() {
+      return note.value !== baseline;
+    }
+
     function showStatus(text) {
       status.textContent = text;
       status.classList.add('show');
@@ -165,7 +209,8 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
     }
 
     function save() {
-      vscode.postMessage({ type: 'save', text: note.value });
+      baseline = note.value;
+      vscode.postMessage({ type: 'save', text: baseline });
     }
 
     function scheduleSave() {
@@ -175,22 +220,46 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
       saveTimer = setTimeout(save, 400);
     }
 
+    function applyExternal(text) {
+      note.value = text;
+      baseline = text;
+      pendingExternal = null;
+      showStatus('Updated');
+    }
+
     note.addEventListener('input', scheduleSave);
 
-    // Flush immediately on blur so notes are never lost when the view hides.
     note.addEventListener('blur', () => {
       if (!ready) return;
       if (saveTimer) clearTimeout(saveTimer);
-      save();
+      if (isDirty()) {
+        save();
+      } else if (pendingExternal !== null) {
+        applyExternal(pendingExternal);
+      }
     });
 
     window.addEventListener('message', (event) => {
       const message = event.data;
       if (message.type === 'load') {
         note.value = message.text || '';
+        baseline = note.value;
         ready = true;
       } else if (message.type === 'saved') {
         showStatus('Saved');
+      } else if (message.type === 'external') {
+        const text = message.text || '';
+        if (note.value === text) {
+          baseline = text;
+          return;
+        }
+        // Don't overwrite the user mid-edit; defer until they click away.
+        if (document.activeElement === note && isDirty()) {
+          pendingExternal = text;
+          showStatus('Updated elsewhere');
+        } else {
+          applyExternal(text);
+        }
       }
     });
 
