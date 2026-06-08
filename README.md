@@ -3,6 +3,8 @@
 A dead-simple notepad that lives in the VSCode sidebar. The notes are stored
 **globally** — the same text shows up in every window, folder, and workspace.
 
+<img height="400" alt="image" src="https://github.com/user-attachments/assets/8755513f-124b-4901-9dea-1df8260c2411" />
+
 ## Features
 
 - Sidebar panel (own icon in the Activity Bar) with a full-height text area.
