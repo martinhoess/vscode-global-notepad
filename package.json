@@ -1,0 +1,66 @@
+{
+  "name": "global-notepad",
+  "displayName": "Global Notepad",
+  "description": "An always-available sidebar notepad. Notes are stored globally and shared across every workspace and folder.",
+  "version": "0.1.0",
+  "publisher": "martinhoess",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/martinhoess/vscode-global-notepad.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "notes",
+    "notepad",
+    "scratchpad",
+    "global"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "globalNotepad",
+          "title": "Notepad",
+          "icon": "media/notepad.svg"
+        }
+      ]
+    },
+    "views": {
+      "globalNotepad": [
+        {
+          "id": "globalNotepad.view",
+          "name": "Notes",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "globalNotepad.openNotesFile",
+        "title": "Global Notepad: Open Notes File in Editor"
+      },
+      {
+        "command": "globalNotepad.revealNotesFile",
+        "title": "Global Notepad: Reveal Notes File on Disk"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}
