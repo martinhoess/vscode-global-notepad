@@ -4,7 +4,7 @@
   "description": "An always-available sidebar notepad. Notes are stored globally and shared across every workspace and folder.",
   "version": "0.1.4",
   "publisher": "martinhoess",
-  "license": "MIT",
+  "license": "WTFPL",
   "icon": "media/icon.png",
   "repository": {
     "type": "git",
