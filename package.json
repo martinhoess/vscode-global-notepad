@@ -2,7 +2,7 @@
   "name": "global-notepad",
   "displayName": "Global Notepad",
   "description": "An always-available sidebar notepad. Notes are stored globally and shared across every workspace and folder.",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "publisher": "martinhoess",
   "license": "WTFPL",
   "icon": "media/icon.png",
@@ -53,8 +53,22 @@
       {
         "command": "globalNotepad.revealNotesFile",
         "title": "Global Notepad: Reveal Notes File on Disk"
+      },
+      {
+        "command": "globalNotepad.openInEditor",
+        "title": "Global Notepad: Open Notepad in Editor Area",
+        "icon": "$(window)"
       }
-    ]
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "globalNotepad.openInEditor",
+          "when": "view == globalNotepad.view",
+          "group": "navigation"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

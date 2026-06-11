@@ -30,6 +30,10 @@ export async function activate(context: vscode.ExtensionContext) {
       await vscode.commands.executeCommand('revealFileInOS', provider.notesFile);
     })
   );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('globalNotepad.openInEditor', () => provider.openInEditor())
+  );
 }
 
 export function deactivate() {}
@@ -37,7 +41,10 @@ export function deactivate() {}
 class NotepadViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'globalNotepad.view';
 
-  private view?: vscode.WebviewView;
+  /** Every live notepad surface — the sidebar view plus any editor-area panel. */
+  private readonly webviews = new Set<vscode.Webview>();
+  /** The editor-area panel, if one is currently open. */
+  private panel?: vscode.WebviewPanel;
   private watcher?: vscode.FileSystemWatcher;
 
   /** Last content we know is on disk — used to ignore our own write echoes. */
@@ -59,7 +66,7 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
       // Same content we already hold (typically our own write echoing back) — ignore.
       if (text === this.currentText) return;
       this.currentText = text;
-      this.view?.webview.postMessage({ type: 'external', text });
+      this.broadcast({ type: 'external', text });
     };
 
     this.watcher.onDidChange(onChange);
@@ -68,31 +75,80 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
   }
 
   public resolveWebviewView(webviewView: vscode.WebviewView): void {
-    this.view = webviewView;
+    this.wire(webviewView.webview);
+    webviewView.onDidDispose(() => this.webviews.delete(webviewView.webview));
+  }
 
-    webviewView.webview.options = {
+  /**
+   * Open (or focus) the notepad as an editor tab beside the active editor.
+   * Unlike the sidebar view it doesn't vanish when another activity-bar icon is
+   * selected, and it can be pinned / split for a permanent on-screen spot.
+   */
+  public async openInEditor(): Promise<void> {
+    await this.ensureNotesFile();
+
+    if (this.panel) {
+      this.panel.reveal(this.panel.viewColumn ?? vscode.ViewColumn.Beside);
+      return;
+    }
+
+    const panel = vscode.window.createWebviewPanel(
+      'globalNotepad.editor',
+      'Notepad',
+      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
+      {
+        enableScripts: true,
+        // Keep the textarea alive across tab switches, same as the sidebar view.
+        retainContextWhenHidden: true,
+        localResourceRoots: [this.context.extensionUri]
+      }
+    );
+    panel.iconPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'notepad.svg');
+    this.panel = panel;
+
+    this.wire(panel.webview);
+    panel.onDidDispose(() => {
+      this.webviews.delete(panel.webview);
+      this.panel = undefined;
+    });
+  }
+
+  /** Attach our HTML + message protocol to a webview and register it for sync. */
+  private wire(webview: vscode.Webview): void {
+    webview.options = {
       enableScripts: true,
       localResourceRoots: [this.context.extensionUri]
     };
+    webview.html = this.getHtml(webview);
+    this.webviews.add(webview);
 
-    webviewView.webview.html = this.getHtml(webviewView.webview);
-
-    webviewView.webview.onDidReceiveMessage(async (message) => {
+    webview.onDidReceiveMessage(async (message) => {
       switch (message?.type) {
         case 'ready':
           this.currentText = await this.read();
-          webviewView.webview.postMessage({ type: 'load', text: this.currentText });
+          webview.postMessage({ type: 'load', text: this.currentText });
           break;
         case 'save': {
           const text = typeof message.text === 'string' ? message.text : '';
           // Record before writing so the watcher echo is recognised and skipped.
           this.currentText = text;
           await this.write(text);
-          webviewView.webview.postMessage({ type: 'saved' });
+          webview.postMessage({ type: 'saved' });
+          // The watcher ignores our own write, so mirror the change to any other
+          // notepad surfaces open in this same window directly.
+          this.broadcast({ type: 'external', text }, webview);
           break;
         }
       }
     });
+  }
+
+  /** Post a message to every live notepad surface, optionally skipping one. */
+  private broadcast(message: unknown, except?: vscode.Webview): void {
+    for (const webview of this.webviews) {
+      if (webview === except) continue;
+      webview.postMessage(message);
+    }
   }
 
   public async ensureNotesFile(): Promise<void> {
