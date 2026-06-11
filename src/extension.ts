@@ -75,8 +75,9 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
   }
 
   public resolveWebviewView(webviewView: vscode.WebviewView): void {
-    this.wire(webviewView.webview);
-    webviewView.onDidDispose(() => this.webviews.delete(webviewView.webview));
+    const webview = webviewView.webview;
+    this.wire(webview);
+    webviewView.onDidDispose(() => this.webviews.delete(webview));
   }
 
   /**
@@ -104,12 +105,17 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
       }
     );
     panel.iconPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'notepad.svg');
+    // Cache the webview now: once the panel is disposed, the `panel.webview`
+    // getter itself throws, so we must not read it from the dispose handler.
+    const webview = panel.webview;
     this.panel = panel;
 
-    this.wire(panel.webview);
+    this.wire(webview);
     panel.onDidDispose(() => {
-      this.webviews.delete(panel.webview);
+      // Null the panel first; if anything below threw we'd otherwise keep a
+      // stale, disposed panel and the next openInEditor() would reveal() it.
       this.panel = undefined;
+      this.webviews.delete(webview);
     });
   }
 
@@ -147,7 +153,12 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
   private broadcast(message: unknown, except?: vscode.Webview): void {
     for (const webview of this.webviews) {
       if (webview === except) continue;
-      webview.postMessage(message);
+      try {
+        webview.postMessage(message);
+      } catch {
+        // Disposed between registration and now — drop it from the set.
+        this.webviews.delete(webview);
+      }
     }
   }
 
