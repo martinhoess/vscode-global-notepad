@@ -2,7 +2,7 @@
   "name": "global-notepad",
   "displayName": "Global Notepad",
   "description": "An always-available sidebar notepad. Notes are stored globally and shared across every workspace and folder.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "martinhoess",
   "license": "WTFPL",
   "icon": "media/icon.png",
@@ -41,7 +41,8 @@
         {
           "id": "globalNotepad.view",
           "name": "Notes",
-          "type": "webview"
+          "type": "webview",
+          "icon": "media/notepad.svg"
         }
       ]
     },
