@@ -149,16 +149,14 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  /** Post a message to every live notepad surface, optionally skipping one. */
+  /**
+   * Post a message to every live notepad surface, optionally skipping one.
+   * Disposed surfaces are removed by their own onDidDispose handler, so the set
+   * only ever holds live webviews here.
+   */
   private broadcast(message: unknown, except?: vscode.Webview): void {
     for (const webview of this.webviews) {
-      if (webview === except) continue;
-      try {
-        webview.postMessage(message);
-      } catch {
-        // Disposed between registration and now — drop it from the set.
-        this.webviews.delete(webview);
-      }
+      if (webview !== except) webview.postMessage(message);
     }
   }
 
@@ -292,47 +290,50 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
 
     function applyExternal(text) {
       replaceAllText(text);
-      baseline = text;
+      // Read the baseline back off the field instead of trusting the incoming
+      // text: a textarea normalises CRLF to LF, so a file written with CRLF
+      // would otherwise never match and leave the field permanently "dirty".
+      baseline = note.value;
       pendingExternal = null;
       showStatus('Updated');
     }
 
-    // Replace the whole textarea content while keeping the native undo stack
-    // intact. Assigning textarea.value directly wipes the browser undo history,
-    // which makes Ctrl+Z behave erratically after a cross-window sync. Routing
-    // the change through execCommand keeps it as a normal, undoable edit.
+    // Replace the whole textarea content. While the field has focus the change
+    // goes through execCommand so the native undo stack survives — assigning
+    // textarea.value directly wipes the browser undo history and makes Ctrl+Z
+    // behave erratically after a cross-window sync. Without focus we assign
+    // directly: focusing just to keep an undo entry would pull the caret out of
+    // whatever the user is actually typing in, and the resulting blur would run
+    // the blur handler mid-update against a stale baseline.
     function replaceAllText(text) {
       if (note.value === text) return;
 
-      const wasFocused = document.activeElement === note;
-      const selStart = note.selectionStart;
-      const selEnd = note.selectionEnd;
-
       applying = true;
-      note.focus();
-      note.select();
+      if (document.activeElement === note) {
+        const selStart = note.selectionStart;
+        const selEnd = note.selectionEnd;
+        note.select();
 
-      let ok = false;
-      try {
-        ok = text === ''
-          ? document.execCommand('delete', false)
-          : document.execCommand('insertText', false, text);
-      } catch (e) {
-        ok = false;
-      }
-      if (!ok || note.value !== text) {
-        // Fallback: loses undo history, but only on platforms without execCommand.
+        let ok = false;
+        try {
+          ok = text === ''
+            ? document.execCommand('delete', false)
+            : document.execCommand('insertText', false, text);
+        } catch (e) {
+          ok = false;
+        }
+        if (!ok || note.value !== text) {
+          // Fallback: loses undo history, but only on platforms without execCommand.
+          note.value = text;
+        }
+
+        const start = Math.min(selStart, note.value.length);
+        const end = Math.min(selEnd, note.value.length);
+        try { note.setSelectionRange(start, end); } catch (e) { /* ignore */ }
+      } else {
         note.value = text;
       }
       applying = false;
-
-      if (!wasFocused) {
-        note.blur();
-      } else {
-        const start = Math.min(selStart, text.length);
-        const end = Math.min(selEnd, text.length);
-        try { note.setSelectionRange(start, end); } catch (e) { /* ignore */ }
-      }
     }
 
     note.addEventListener('input', () => {
