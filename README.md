@@ -11,9 +11,10 @@ A dead-simple notepad that lives in the VSCode sidebar. The notes are stored
 - Auto-saves while you type (debounced) and immediately when the panel loses focus.
 - Notes are stored in the extension's **global storage** directory, so they are
   shared across all workspaces and never end up in a project folder.
-- Two commands (Command Palette):
+- Three commands (Command Palette):
   - `Global Notepad: Open Notes File in Editor`
   - `Global Notepad: Reveal Notes File on Disk`
+  - `Global Notepad: Open Notepad in Editor Area` (also the button in the view title)
 
 ## Where are the notes stored?
 
@@ -49,4 +50,4 @@ Command Palette.
 
 ## License
 
-MIT
+WTFPL — see [LICENSE](LICENSE).

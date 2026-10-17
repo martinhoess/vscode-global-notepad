@@ -49,6 +49,14 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
 
   /** Last content we know is on disk — used to ignore our own write echoes. */
   private currentText = '';
+  /** Saves run one after another so a conflict check never races our own write. */
+  private saveQueue: Promise<void> = Promise.resolve();
+  /**
+   * Last text each surface wrote successfully. Also accepted as "unchanged
+   * disk" so a save queued behind a failed write isn't flagged as a conflict.
+   * Not `currentText`: that follows foreign writes via the watcher too.
+   */
+  private readonly lastWritten = new WeakMap<vscode.Webview, string>();
 
   public readonly notesFile: vscode.Uri;
 
@@ -62,7 +70,12 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
     this.watcher = vscode.workspace.createFileSystemWatcher(pattern);
 
     const onChange = async () => {
-      const text = await this.read();
+      let text: string;
+      try {
+        text = await this.read();
+      } catch {
+        return; // unreadable right now — keep what the views show, never push ''
+      }
       // Same content we already hold (typically our own write echoing back) — ignore.
       if (text === this.currentText) return;
       this.currentText = text;
@@ -131,22 +144,67 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
     webview.onDidReceiveMessage(async (message) => {
       switch (message?.type) {
         case 'ready':
-          this.currentText = await this.read();
+          try {
+            this.currentText = await this.read();
+          } catch (err) {
+            // Without 'load' the view never becomes ready, so it can't save an
+            // empty field over notes we merely failed to read.
+            vscode.window.showErrorMessage(`Global Notepad: could not read notes — ${reason(err)}`);
+            break;
+          }
           webview.postMessage({ type: 'load', text: this.currentText });
           break;
-        case 'save': {
-          const text = typeof message.text === 'string' ? message.text : '';
-          // Record before writing so the watcher echo is recognised and skipped.
-          this.currentText = text;
-          await this.write(text);
-          webview.postMessage({ type: 'saved' });
-          // The watcher ignores our own write, so mirror the change to any other
-          // notepad surfaces open in this same window directly.
-          this.broadcast({ type: 'external', text }, webview);
+        case 'save':
+          this.saveQueue = this.saveQueue.then(() => this.save(webview, message));
+          await this.saveQueue;
           break;
-        }
       }
     });
+  }
+
+  /**
+   * Write one surface's text. `base` is the content that surface last knew to
+   * be on disk; if the disk has moved on since, someone else wrote in between.
+   * Then their version is kept in a conflict file next to the notes and the
+   * view is told, instead of silently overwriting their change.
+   */
+  private async save(webview: vscode.Webview, message: { text?: unknown; base?: unknown }): Promise<void> {
+    const text = typeof message.text === 'string' ? message.text : '';
+    const base = typeof message.base === 'string' ? message.base : '';
+    const previous = this.currentText;
+    try {
+      await vscode.workspace.fs.createDirectory(this.context.globalStorageUri);
+      // Check right before writeFile: this read is the last await in between.
+      // ponytail: another window's host can still write in that gap; the fs API
+      // has no compare-and-swap, a lock file would be the upgrade path.
+      const raw = await this.read();
+      const disk = sameText(raw);
+      const known = [base, text, this.lastWritten.get(webview)];
+      if (!known.some((k) => k !== undefined && sameText(k) === disk)) {
+        const kept = await this.keepConflict(raw);
+        // The view falls back to the disk version as its base, so the user's
+        // next save overwrites notes.txt — the other version is safe in `kept`.
+        webview.postMessage({ type: 'error', base: disk });
+        vscode.window.showWarningMessage(
+          `Global Notepad: the notes were changed elsewhere since your last save. ` +
+            `That version was kept as ${kept}; your text is saved over it with your next edit.`
+        );
+        return;
+      }
+      // Record before writing so the watcher echo is recognised and skipped.
+      this.currentText = text;
+      await vscode.workspace.fs.writeFile(this.notesFile, Buffer.from(text, 'utf8'));
+      this.lastWritten.set(webview, text);
+    } catch (err) {
+      this.currentText = previous;
+      webview.postMessage({ type: 'error', base });
+      vscode.window.showErrorMessage(`Global Notepad: could not save notes — ${reason(err)}`);
+      return;
+    }
+    webview.postMessage({ type: 'saved' });
+    // The watcher ignores our own write, so mirror the change to any other
+    // notepad surfaces open in this same window directly.
+    this.broadcast({ type: 'external', text }, webview);
   }
 
   /**
@@ -160,11 +218,25 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /** Store a version that lost a conflict next to the notes; returns its file name. */
+  private async keepConflict(text: string): Promise<string> {
+    const name = `notes.conflict-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
+    const uri = vscode.Uri.joinPath(this.context.globalStorageUri, name);
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(text, 'utf8'));
+    return name;
+  }
+
   public async ensureNotesFile(): Promise<void> {
     try {
       await vscode.workspace.fs.stat(this.notesFile);
-    } catch {
-      await this.write('');
+    } catch (err) {
+      // Only create the file when it is really missing — never blank it over
+      // an error that merely hides existing notes.
+      if (err instanceof vscode.FileSystemError && err.code === 'FileNotFound') {
+        await this.write('');
+      } else {
+        vscode.window.showErrorMessage(`Global Notepad: could not access notes — ${reason(err)}`);
+      }
     }
   }
 
@@ -172,8 +244,11 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
     try {
       const data = await vscode.workspace.fs.readFile(this.notesFile);
       return Buffer.from(data).toString('utf8');
-    } catch {
-      return '';
+    } catch (err) {
+      // Only a missing file means "no notes yet"; anything else (permissions,
+      // I/O) must not masquerade as empty text that a save would then persist.
+      if (err instanceof vscode.FileSystemError && err.code === 'FileNotFound') return '';
+      throw err;
     }
   }
 
@@ -264,6 +339,8 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
     // An external change received while the user was actively editing here;
     // applied once they click away so we never clobber live keystrokes.
     let pendingExternal = null;
+    // Saves sent to the host and not yet answered with 'saved' / 'error'.
+    let inFlight = 0;
 
     function isDirty() {
       return note.value !== baseline;
@@ -277,8 +354,9 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
     }
 
     function save() {
+      vscode.postMessage({ type: 'save', text: note.value, base: baseline });
       baseline = note.value;
-      vscode.postMessage({ type: 'save', text: baseline });
+      inFlight++;
     }
 
     function scheduleSave() {
@@ -346,7 +424,9 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
       if (saveTimer) clearTimeout(saveTimer);
       if (isDirty()) {
         save();
-      } else if (pendingExternal !== null) {
+      } else if (pendingExternal !== null && inFlight === 0) {
+        // While a save is unanswered the deferred text is about to be
+        // superseded ('saved') or kept in a conflict file ('error').
         applyExternal(pendingExternal);
       }
     });
@@ -358,15 +438,25 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
         baseline = note.value;
         ready = true;
       } else if (message.type === 'saved') {
+        inFlight = Math.max(0, inFlight - 1);
+        // Our text is on disk now; the deferred one would only clobber it.
+        pendingExternal = null;
         showStatus('Saved');
+      } else if (message.type === 'error') {
+        inFlight = Math.max(0, inFlight - 1);
+        // Save failed or hit a conflict: fall back to what is on disk, so the
+        // field counts as dirty again and the next blur / edit retries.
+        baseline = message.base || '';
+        showStatus('Not saved');
       } else if (message.type === 'external') {
         const text = message.text || '';
         if (note.value === text) {
           baseline = text;
           return;
         }
-        // Don't overwrite the user mid-edit; defer until they click away.
-        if (document.activeElement === note && isDirty()) {
+        // Never overwrite unsaved text (mid-edit, or left over from a failed
+        // save); defer until it is saved or the user clicks away clean.
+        if (isDirty()) {
           pendingExternal = text;
           showStatus('Updated elsewhere');
         } else {
@@ -380,6 +470,15 @@ class NotepadViewProvider implements vscode.WebviewViewProvider {
 </body>
 </html>`;
   }
+}
+
+/** A textarea normalises CR and CRLF to LF, so compare text the same way. */
+function sameText(text: string): string {
+  return text.replace(/\r\n?/g, '\n');
+}
+
+function reason(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function getNonce(): string {
